@@ -1,0 +1,196 @@
+services:
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    hostname: rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    hostname: redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+
+  keycloak:
+    build:
+      context: ./keycloak
+      dockerfile: Dockerfile
+    container_name: keycloak
+    hostname: keycloak
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    networks:
+      - app-network
+
+  email-verifier:
+    build:
+      context: ./email-verifier
+      dockerfile: Dockerfile
+    container_name: email-verifier
+    hostname: email-verifier
+    ports:
+      - "8081:8081"
+      - "8082:8082"
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      keycloak:
+        condition: service_started
+    networks:
+      - app-network
+
+  profile-service:
+    build:
+      context: ./profile-service
+      dockerfile: Dockerfile
+    container_name: profile-service
+    hostname: profile-service
+    ports:
+      - "8083:8083"
+      - "8084:8084"
+    env_file:
+      - .env
+    depends_on:
+      email-verifier:
+        condition: service_started
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  notification-service:
+    build:
+      context: ./notification_service
+      dockerfile: Dockerfile
+    container_name: notification-service
+    hostname: notification-service
+    ports:
+      - "8085:8085"
+    env_file:
+      - .env
+    depends_on:
+      email-verifier:
+        condition: service_started
+      redis:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  analysis-service:
+    build:
+      context: ./analysis_service
+      dockerfile: Dockerfile
+    container_name: analysis-service
+    hostname: analysis-service
+    ports:
+      - "8086:8086"
+    env_file:
+      - .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      email-verifier:
+        condition: service_started
+      keycloak:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: elasticsearch
+    hostname: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "9200:9200"
+    networks:
+      - app-network
+
+  indexing-worker:
+    build:
+      context: ./indexing-worker
+      dockerfile: Dockerfile
+    container_name: indexing-worker
+    hostname: indexing-worker
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+    networks:
+      - app-network
+
+  kong:
+    image: kong:3.6
+    container_name: kong
+    hostname: kong
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /usr/local/kong/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: 0.0.0.0:8001
+      KONG_PLUGINS: bundled,kong-plugin-keycloak-login,token-introspect-plugin,token-refresh-plugin
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+    env_file:
+      - .env
+    volumes:
+      - ./kong/kong.yml:/usr/local/kong/kong.yml
+      - ./kong/plugins/kong-plugin-keycloak-login:/usr/local/share/lua/5.1/kong/plugins/kong-plugin-keycloak-login
+      - ./kong/plugins/token-introspect-plugin:/usr/local/share/lua/5.1/kong/plugins/token-introspect-plugin
+      - ./kong/plugins/token-refresh-plugin:/usr/local/share/lua/5.1/kong/plugins/token-refresh-plugin
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge
+
